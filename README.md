@@ -53,7 +53,7 @@ def delete(self):
 ```
 
 ### Future Additions
-In the near future, celery, redis and mongoDB will be added to the technology stack. These features will slightly alter the setup of these API endpoints. Each API endpoint will require two request endpoints, one for triggering the calculation (which will return a jobID) and another for retrieving the results of the calculation (by providing the jobID). Incorporating these additional packages will provide complete scalability in processing and requests, limit would be determined by the limits set by kupernetes or docker swarm settings.
+In the near future, celery, redis and mongoDB will be added to the technology stack. These features will slightly alter the setup of these API endpoints. Each API endpoint will require two request endpoints, one for triggering the calculation (which will return a jobID) and another for retrieving the results of the calculation (by providing the jobID). Incorporating these additional packages will provide complete scalability in processing and requests, limit would be determined by the limits set by kubernetes or docker swarm settings.
 
 Process steps of these additions:
 1. Request will remain the same (coming into the flask endpoint)
