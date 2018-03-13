@@ -29,7 +29,7 @@ class HMSNcdcStations(Resource):
                 geometry.crs = from_epsg(args.crs)
             except:
                 return Response("{'crs error': 'Invalid crs provided'}")
-            geometry = geometry.to_crs({'init': 'epsg:4326'})
+            geometry = geometry.to_crs({'init': 'epsg:326'})
             geojson = json.loads(geometry.to_json())
             extent = geometry.total_bounds
         else:
