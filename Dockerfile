@@ -1,7 +1,6 @@
 FROM python:3
 
 ENV GDAL_VERSION=2.2.1
-ENV GDAL_VERSION_PYTHON=2.2.1
 
 COPY requirements.txt /tmp/
 RUN pip install --requirement /tmp/requirements.txt
