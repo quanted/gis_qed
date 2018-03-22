@@ -1,6 +1,6 @@
 from flask import Flask
-from flask_cors import CORS
-from flask_restful_swagger_2 import Api
+# from flask_cors import CORS
+from flask_restful import Api
 import os
 
 # Import modules
@@ -8,12 +8,12 @@ from modules.hms import ncdc_stations
 from modules.hms import percent_area
 
 app = Flask(__name__)
-CORS(app)
+# CORS(app)
 app.config.update(
     DEBUG=True
 )
 
-api = Api(app, api_version='0.1', api_spec_url='/api/swagger')
+api = Api(app)
 
 PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 os.environ.update({
