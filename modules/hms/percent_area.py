@@ -208,7 +208,7 @@ def calculations(huc8, huc12, com, in_file, lat_long):
 				inter = poly.Intersection(cell)
 				interArea += inter.Area()
 				percentArea = (interArea / squareArea) * 100
-				catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetX(), cell.Centroid().GetY(), percentArea)
+				catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetY(), cell.Centroid().GetX(), percentArea)
 				huc12table.points.append(catchtable.__dict__)
 				num_points += 1
 		table.geometry[coms[i]] = huc12table.__dict__
