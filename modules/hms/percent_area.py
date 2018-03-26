@@ -25,10 +25,10 @@ class getPercentArea(Resource):
 	'''
 	User sends Catchment ID (CommID) and HUC8 number to get % area of each NLDAS/GLDAS cell covered by the catchment
 	Sample usage:
-	http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002&com_id_num=9311911
-	http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002
-	http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020100050107
-	http://127.0.0.1:5000/gis/rest/hms/percentage/?lat_long_x=-83.5&lat_long_y=33.5
+	1) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020100050107
+	2) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002
+	3) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002&com_id_num=9311911
+	6/7) http://127.0.0.1:5000/gis/rest/hms/percentage/?lat_long_x=-83.5&lat_long_y=33.5
 	'''
 	def get(self):
 		args = parser.parse_args()
@@ -37,26 +37,24 @@ class getPercentArea(Resource):
 		com_id_num = args.com_id_num
 		latlongx = args.lat_long_x
 		latlongy = args.lat_long_y
-		if(huc_8_num and com_id_num):
-			tab = calculations(huc_8_num, None, com_id_num, None, None)
+		if(huc_8_num):
+			tab = process_huc_8(huc_8_num, com_id_num)
 		elif(huc_12_num):
-			tab = calculations(None, huc_12_num[0:8], None, None, None)	#Huc12s are catalogued on ftp server by huc8 numbers
-		elif(huc_8_num):
-			tab = calculations(huc_8_num, None, None, None, None)
+			tab = process_huc_12(huc_12_num[0:8])	#Huc12s are catalogued on ftp server by huc8 numbers
 		elif(latlongx and latlongy):
 			coord = '(' + latlongx + '+' + latlongy + ')'
-			tab = calculations(None, None, None, None, coord)
+			tab = process_lat_long(coord)
 		return jsonify(tab)
 
 	'''
 	User uploads geojson of a catchment or NHDPlus
 	Sample usage:
-	curl -X POST -F 'filename=@file.geojson' http://127.0.0.1:5000/gis/rest/hms/percentage/
+	4/5) curl -X POST -F 'filename=@file.geojson' http://127.0.0.1:5000/gis/rest/hms/percentage/
 	'''
 	def post(self):
 		args = parser.parse_args()
 		if(args.filename is not None):		#Using curl
-			tab = calculations(None, None, None, args.filename.read(), None)
+			tab = process_geojson(args.filename.read())
 		else:
 			return Response("{'posting error': 'POST operation failed'}")
 		return jsonify(tab)
@@ -79,6 +77,39 @@ class CatchmentPoint():
 		self.longitude = longitude
 		self.percentArea = percentArea
 
+def process_huc_8(huc_8_num, com_id_num):
+	url = 'ftp://newftp.epa.gov/exposure/BasinsData/NHDPlus21/NHDPlus' + str(huc_8_num) + '.zip'
+	req = urllib.request.urlopen(url)
+	shzip = ZipFile(io.BytesIO(req.read()))
+	mshp = shzip.open('NHDPlus' + str(huc_8_num) + '/Drainage/Catchment.shp')
+	mdbf = shzip.open('NHDPlus' + str(huc_8_num) + '/Drainage/Catchment.dbf')
+	sfile = shp_to_geojson(mshp, mdbf)
+	result_table = readGeometry(sfile, url, com_id_num)
+	return result_table
+
+def process_huc_12(huc_12_num):
+	url = 'ftp://newftp.epa.gov/exposure/NHDV1/HUC12_Boundries/' + str(huc_12_num) + '.zip'
+	req = urllib.request.urlopen(url)
+	shzip = ZipFile(io.BytesIO(req.read()))
+	mshp = shzip.open(str(huc_12_num) + '/huc12.shp')
+	mdbf = shzip.open(str(huc_12_num) + '/huc12.dbf')
+	sfile = shp_to_geojson(mshp, mdbf)
+	result_table = readGeometry(sfile, url, None)
+	return result_table
+
+def process_lat_long(coordinate):
+	url = 'https://ofmpub.epa.gov/waters10/SpatialAssignment.Service?pGeometry=POINT' + coordinate + '&pLayer=NHDPLUS_CATCHMENT&pSpatialSnap=TRUE&pReturnGeometry=TRUE'
+	req = urllib.request.urlopen(url)
+	sfile = req.read()
+	com = re.search(r'("[0-9]{2,}")', str(sfile))
+	geojson = re.search(r'(?={"type").*(]})', str(sfile))
+	result_table = readGeometry(geojson.group(0), url, com.group(0).replace('"', ''))
+	return result_table
+
+def process_geojson(file):
+	result_table = readGeometry(file, None, None)
+	return result_table
+
 def shp_to_geojson(mshp, mdbf):
 	# read the shapefile
 	reader = shapefile.Reader(shp=mshp, dbf=mdbf)
@@ -93,47 +124,21 @@ def shp_to_geojson(mshp, mdbf):
 	geojson = json.dumps({"type": "FeatureCollection", "features": buffer}, indent=2) + "\n"
 	return geojson
 
-def calculations(huc8, huc12, com, in_file, lat_long):
-	start = time.time()
-	table = GeometryTable()
+def readGeometry(sfile, url, com):
+	metadataList = []
+	metadataList.append(time.time())
 	shapeFiles = []
 	nldasFiles = []
 	colNames = []
-	if(in_file):
-		sfile = in_file
-		url = None
-	elif(huc8):
-		url = 'ftp://newftp.epa.gov/exposure/BasinsData/NHDPlus21/NHDPlus' + str(huc8) + '.zip'
-		req = urllib.request.urlopen(url)
-		shzip = ZipFile(io.BytesIO(req.read()))
-		mshp = shzip.open('NHDPlus' + str(huc8) + '/Drainage/Catchment.shp')
-		mdbf = shzip.open('NHDPlus' + str(huc8) + '/Drainage/Catchment.dbf')
-		sfile = shp_to_geojson(mshp, mdbf)
-	elif(huc12):
-		url = 'ftp://newftp.epa.gov/exposure/NHDV1/HUC12_Boundries/' + str(huc12) + '.zip'
-		req = urllib.request.urlopen(url)
-		shzip = ZipFile(io.BytesIO(req.read()))
-		mshp = shzip.open(str(huc12) + '/huc12.shp')
-		mdbf = shzip.open(str(huc12) + '/huc12.dbf')
-		sfile = shp_to_geojson(mshp, mdbf)
-	elif(lat_long):
-		url = 'https://ofmpub.epa.gov/waters10/SpatialAssignment.Service?pGeometry=POINT' + lat_long + '&pLayer=NHDPLUS_CATCHMENT&pSpatialSnap=TRUE&pReturnGeometry=TRUE'
-		req = urllib.request.urlopen(url)
-		sfile = GUID + 'shape.geojson'
-		string = open(sfile, 'r')
-		re_str = string.read()
-		geojson = re.search(r'(?={"type").*(]})', re_str)
-		out_file = open(sfile, 'w')
-		out_file.write(geojson.group(0))
-		out_file.close()
-		string.close()
 	nldasurl = 'https://ldas.gsfc.nasa.gov/nldas/gis/NLDAS_Grid_Reference.zip'
+	metadataList.append(url)
+	metadataList.append(nldasurl)
 	resp = urllib.request.urlopen(nldasurl)
 	gridzip = ZipFile(io.BytesIO(resp.read()))
 	gshp = gridzip.open('NLDAS_Grid_Reference.shp')
 	gdbf = gridzip.open('NLDAS_Grid_Reference.dbf')
 	gfile = shp_to_geojson(gshp, gdbf)
-	print("FINISHED CONVERTING: ", time.time() - start)
+	#print("FINISHED CONVERTING: ", time.time() - metadataList[0])
 	shape = ogr.Open(sfile)
 	nldas = ogr.Open(gfile)
 	shapeLayer = shape.GetLayer()
@@ -151,12 +156,12 @@ def calculations(huc8, huc12, com, in_file, lat_long):
 	if ('COMID' in colNames):
 		huc12s = [None] * len(shapeLayer)  # No huc 12s
 		for feature in shapeLayer:
-			if(com):
+			if (com):
 				if (feature.GetField('COMID') == int(com)):  # Only focusing on the given catchment argument
 					polygons.append(feature)
 					coms.append(feature.GetField('COMID'))
 					huc8s.append(feature.GetField('HUC8'))
-					#break #Since only one catchment is needed
+			# break #Since only one catchment is needed
 			else:
 				polygons.append(feature)
 				coms.append(feature.GetField('COMID'))
@@ -169,30 +174,35 @@ def calculations(huc8, huc12, com, in_file, lat_long):
 			huc12s.append(feature.GetField('HUC_12'))
 	else:
 		coms = [None] * len(shapeLayer)
+		if(com):
+			coms[0] = com
 		huc8s = [None] * len(shapeLayer)
 		huc12s = [None] * len(shapeLayer)
 		for feature in shapeLayer:
 			polygons.append(feature)
 	# Reproject geometries from shapefile
 	totalPoly = ogr.Geometry(ogr.wkbMultiPolygon)
-	#Treat all polygons as one larger one since we are just finding overlapping cells
+	# Treat all polygons as one larger one since we are just finding overlapping cells
 	for polygon in polygons:
 		poly = polygon.GetGeometryRef()
 		poly.Transform(coordTrans)
 		totalPoly.AddGeometry(poly)
-	if(lat_long):
-		totalPoly = polygons[0].GetGeometryRef()
-	else:
-		totalPoly = totalPoly.UnionCascaded()
+	totalPoly = totalPoly.UnionCascaded()
+	if (totalPoly == None):
+		totalPoly = polygons[0].GetGeometryRef()  # latLong
 	# Calculate cells that contain polygons ahead of time to make intersections faster
 	# This block of code should be parallelized if possible
 	for feature in nldasLayer:
 		cell = feature.GetGeometryRef()
 		if (totalPoly.Intersects(cell) and feature not in overlap):
 			overlap.append(feature)
+	return calculations(overlap, polygons, coms, huc8s, huc12s, metadataList)
+
+def calculations(overlap, polygons, coms, huc8s, huc12s, metadataList):
 	# Iterate through smaller list of overlapping cells to calculate data
 	#table.geometry = {"HUC 8 ID": huc8s[0]}
 	#huc8table = [{"HUC 8 ID": huc8s[0]}]
+	table = GeometryTable()
 	i = 0;
 	num_points = 0
 	for polygon in polygons:
@@ -208,7 +218,7 @@ def calculations(huc8, huc12, com, in_file, lat_long):
 				inter = poly.Intersection(cell)
 				interArea += inter.Area()
 				percentArea = (interArea / squareArea) * 100
-				catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetX(), cell.Centroid().GetY(), percentArea)
+				catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetY(), cell.Centroid().GetX(), percentArea)
 				huc12table.points.append(catchtable.__dict__)
 				num_points += 1
 		table.geometry[coms[i]] = huc12table.__dict__
@@ -217,9 +227,9 @@ def calculations(huc8, huc12, com, in_file, lat_long):
 	#table.geometry.append(huc8table)
 	table.metadata['request date'] = datetime.datetime.now()
 	table.metadata['number of points'] = num_points
-	table.metadata['shapefile source'] = url
-	table.metadata['nldas source'] = nldasurl
-	table.metadata['execution time'] = time.time() - start
+	table.metadata['shapefile source'] = metadataList[2]
+	table.metadata['nldas source'] = metadataList[1]
+	table.metadata['execution time'] = time.time() - metadataList[0]
 	# De-reference shapefiles
 	shape = None
 	nldas = None
