@@ -1,6 +1,6 @@
-from flask import Flask
+from flask import Flask, Response
 # from flask_cors import CORS
-from flask_restful import Api
+from flask_restful import Api, Resource
 import os
 
 # Import modules
@@ -20,7 +20,14 @@ os.environ.update({
     'PROJECT_ROOT': PROJECT_ROOT
 })
 
+
+class StatusTest(Resource):
+    def get(self):
+        return {"status": "GIS_QED up and running."}
+
+
 print('GIS QED at http://localhost:7888 started')
+api.add_resource(StatusTest, '/gis/rest/test/')
 
 # HMS endpoints
 # TODO: add endpoint for get after converting post endpoint to celery function
