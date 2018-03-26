@@ -24,7 +24,7 @@ parser.add_argument('filename', location='files', type=FileStorage)
 class getPercentArea(Resource):
 	'''
 	User sends Catchment ID (CommID) and HUC8 number to get % area of each NLDAS/GLDAS cell covered by the catchment
-	Sample usage:
+	Sample usage: 
 	1) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020100050107
 	2) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002
 	3) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002&com_id_num=9311911
