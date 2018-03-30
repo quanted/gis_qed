@@ -1,9 +1,12 @@
 from flask import Response, Flask, request, jsonify
 from flask_restful import Resource, reqparse, abort
 from werkzeug.datastructures import FileStorage
+import multiprocessing as mp
+from joblib import Parallel, delayed
 from osgeo import ogr, osr
 import urllib.request
 from zipfile import *
+import numpy as np
 import shapefile
 import datetime
 import requests
@@ -12,6 +15,8 @@ import json
 import time
 import io
 import re
+
+#app = Celery('tasks', broker='redis://localhost:6379/0')
 
 parser = reqparse.RequestParser()
 parser.add_argument('huc_8_num')
@@ -24,7 +29,7 @@ parser.add_argument('filename', location='files', type=FileStorage)
 class getPercentArea(Resource):
 	'''
 	User sends Catchment ID (CommID) and HUC8 number to get % area of each NLDAS/GLDAS cell covered by the catchment
-	Sample usage: 
+	Sample usage:
 	1) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020100050107
 	2) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002
 	3) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002&com_id_num=9311911
@@ -125,20 +130,16 @@ def shp_to_geojson(mshp, mdbf):
 	return geojson
 
 def readGeometry(sfile, url, com):
-	metadataList = []
-	metadataList.append(time.time())
+	start = time.time()
 	shapeFiles = []
 	nldasFiles = []
 	colNames = []
 	nldasurl = 'https://ldas.gsfc.nasa.gov/nldas/gis/NLDAS_Grid_Reference.zip'
-	metadataList.append(url)
-	metadataList.append(nldasurl)
 	resp = urllib.request.urlopen(nldasurl)
 	gridzip = ZipFile(io.BytesIO(resp.read()))
 	gshp = gridzip.open('NLDAS_Grid_Reference.shp')
 	gdbf = gridzip.open('NLDAS_Grid_Reference.dbf')
 	gfile = shp_to_geojson(gshp, gdbf)
-	#print("FINISHED CONVERTING: ", time.time() - metadataList[0])
 	shape = ogr.Open(sfile)
 	nldas = ogr.Open(gfile)
 	shapeLayer = shape.GetLayer()
@@ -152,7 +153,7 @@ def readGeometry(sfile, url, com):
 	for i in range(colLayer.GetFieldCount()):
 		colNames.append(colLayer.GetFieldDefn(i).GetName())
 	coms, huc8s, huc12s = [], [], []
-	overlap, polygons = [], []
+	overlap, polygons, newpolygons = [], [], []
 	if ('COMID' in colNames):
 		huc12s = [None] * len(shapeLayer)  # No huc 12s
 		for feature in shapeLayer:
@@ -187,50 +188,56 @@ def readGeometry(sfile, url, com):
 		poly = polygon.GetGeometryRef()
 		poly.Transform(coordTrans)
 		totalPoly.AddGeometry(poly)
+		newpolygons.append(poly.ExportToJson())
 	totalPoly = totalPoly.UnionCascaded()
 	if (totalPoly == None):
 		totalPoly = polygons[0].GetGeometryRef()  # latLong
 	# Calculate cells that contain polygons ahead of time to make intersections faster
-	# This block of code should be parallelized if possible
 	for feature in nldasLayer:
 		cell = feature.GetGeometryRef()
 		if (totalPoly.Intersects(cell) and feature not in overlap):
-			overlap.append(feature)
-	return calculations(overlap, polygons, coms, huc8s, huc12s, metadataList)
-
-def calculations(overlap, polygons, coms, huc8s, huc12s, metadataList):
-	# Iterate through smaller list of overlapping cells to calculate data
-	#table.geometry = {"HUC 8 ID": huc8s[0]}
-	#huc8table = [{"HUC 8 ID": huc8s[0]}]
+			overlap.append(cell.ExportToJson())
 	table = GeometryTable()
 	i = 0;
 	num_points = 0
-	for polygon in polygons:
-		poly = polygon.GetGeometryRef()
-		huc12table = Catchment()
-		#huc12table.points.append({"HUC 12 ID": huc12s[i]})
-		#huc12table.points.append({"Catchment ID": coms[i]})
-		for feature in overlap:
-			cell = feature.GetGeometryRef()
-			interArea = 0
-			squareArea = cell.Area()
-			if (poly.Intersects(cell)):
-				inter = poly.Intersection(cell)
-				interArea += inter.Area()
-				percentArea = (interArea / squareArea) * 100
-				catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetY(), cell.Centroid().GetX(), percentArea)
-				huc12table.points.append(catchtable.__dict__)
-				num_points += 1
-		table.geometry[coms[i]] = huc12table.__dict__
-		#huc8table.append(huc12table)
+	pool = mp.Pool(30)
+	args = [(polygon, overlap) for polygon in newpolygons]
+	results = pool.map_async(calculations, args)
+	pool.close()
+	pool.join()
+	for obj, np in results.get():
+		table.geometry[coms[i]] = obj.__dict__
+		num_points += np
 		i += 1
-	#table.geometry.append(huc8table)
 	table.metadata['request date'] = datetime.datetime.now()
 	table.metadata['number of points'] = num_points
-	table.metadata['shapefile source'] = metadataList[2]
-	table.metadata['nldas source'] = metadataList[1]
-	table.metadata['execution time'] = time.time() - metadataList[0]
+	table.metadata['shapefile source'] = url
+	table.metadata['nldas source'] = nldasurl
+	table.metadata['execution time'] = time.time() - start
 	# De-reference shapefiles
 	shape = None
 	nldas = None
 	return table.__dict__
+
+def calculations(arg):
+	polygon, overlap = arg
+	num_points = 0
+	poly = ogr.CreateGeometryFromJson(polygon)
+	huc12table = Catchment()
+	# huc12table.points.append({"HUC 12 ID": huc12s[i]})
+	# huc12table.points.append({"Catchment ID": coms[i]})
+	for feature in overlap:
+		cell = ogr.CreateGeometryFromJson(feature)
+		interArea = 0
+		squareArea = cell.Area()
+		if (poly.Intersects(cell)):
+			inter = poly.Intersection(cell)
+			interArea += inter.Area()
+			percentArea = (interArea / squareArea) * 100
+			catchtable = CatchmentPoint(squareArea, interArea, cell.Centroid().GetY(), cell.Centroid().GetX(),
+										percentArea)
+			huc12table.points.append(catchtable.__dict__)
+			num_points += 1
+	# table.geometry[coms[i]] = huc12table.__dict__
+	# huc8table.append(huc12table)
+	return huc12table, num_points
