@@ -7,6 +7,7 @@ from osgeo import ogr, osr
 import urllib.request
 from zipfile import *
 import numpy as np
+import itertools
 import shapefile
 import datetime
 import requests
@@ -30,7 +31,7 @@ class getPercentArea(Resource):
 	'''
 	User sends Catchment ID (CommID) and HUC8 number to get % area of each NLDAS/GLDAS cell covered by the catchment
 	Sample usage:
-	1) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020100050107
+	1) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_12_num=020200030604
 	2) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002
 	3) http://127.0.0.1:5000/gis/rest/hms/percentage/?huc_8_num=01060002&com_id_num=9311911
 	6/7) http://127.0.0.1:5000/gis/rest/hms/percentage/?lat_long_x=-83.5&lat_long_y=33.5
@@ -96,8 +97,12 @@ def process_huc_12(huc_12_num):
 	url = 'ftp://newftp.epa.gov/exposure/NHDV1/HUC12_Boundries/' + str(huc_12_num) + '.zip'
 	req = urllib.request.urlopen(url)
 	shzip = ZipFile(io.BytesIO(req.read()))
-	mshp = shzip.open(str(huc_12_num) + '/huc12.shp')
-	mdbf = shzip.open(str(huc_12_num) + '/huc12.dbf')
+	try:
+		mshp = shzip.open('huc12.shp')
+		mdbf = shzip.open('huc12.dbf')
+	except:
+		mshp = shzip.open(str(huc_12_num) + '/huc12.shp')
+		mdbf = shzip.open(str(huc_12_num) + '/huc12.dbf')
 	sfile = shp_to_geojson(mshp, mdbf)
 	result_table = readGeometry(sfile, url, None)
 	return result_table
@@ -123,6 +128,8 @@ def shp_to_geojson(mshp, mdbf):
 	buffer = []
 	for sr in reader.shapeRecords():
 		atr = dict(zip(field_names, sr.record))
+		if('WBD_Date' in field_names):	#New NHDPlus files use non-serializable datetime objects, must convert to str
+			atr['WBD_Date'] = str(atr['WBD_Date'])
 		geom = sr.shape.__geo_interface__
 		buffer.append(dict(type="Feature", geometry=geom, properties=atr))
 	# write the GeoJSON file
@@ -135,18 +142,14 @@ def readGeometry(sfile, url, com):
 	nldasFiles = []
 	colNames = []
 	nldasurl = 'https://ldas.gsfc.nasa.gov/nldas/gis/NLDAS_Grid_Reference.zip'
-	resp = urllib.request.urlopen(nldasurl)
-	gridzip = ZipFile(io.BytesIO(resp.read()))
-	gshp = gridzip.open('NLDAS_Grid_Reference.shp')
-	gdbf = gridzip.open('NLDAS_Grid_Reference.dbf')
-	gfile = shp_to_geojson(gshp, gdbf)
 	shape = ogr.Open(sfile)
-	nldas = ogr.Open(gfile)
+	nldas = ogr.Open('NLDAS.geojson')	#To Do: Change to filepath on server
 	shapeLayer = shape.GetLayer()
 	nldasLayer = nldas.GetLayer()
 	# Getting data for reprojection
 	shapeProj = shapeLayer.GetSpatialRef()
 	nldasProj = nldasLayer.GetSpatialRef()
+	#print(shapeProj, nldasProj)
 	coordTrans = osr.CoordinateTransformation(shapeProj, nldasProj)
 	# Getting features from shapefile
 	colLayer = shape.GetLayer(0).GetLayerDefn()
@@ -155,30 +158,27 @@ def readGeometry(sfile, url, com):
 	coms, huc8s, huc12s = [], [], []
 	overlap, polygons, newpolygons = [], [], []
 	if ('COMID' in colNames):
-		huc12s = [None] * len(shapeLayer)  # No huc 12s
 		for feature in shapeLayer:
-			if (com):
+			if(com):
 				if (feature.GetField('COMID') == int(com)):  # Only focusing on the given catchment argument
 					polygons.append(feature)
 					coms.append(feature.GetField('COMID'))
-					huc8s.append(feature.GetField('HUC8'))
-			# break #Since only one catchment is needed
 			else:
 				polygons.append(feature)
 				coms.append(feature.GetField('COMID'))
-				huc8s.append(feature.GetField('HUC8'))
+		if(len(polygons) <= 0):
+			return 'The COMID was not found in the specified HUC8.'  # If user enters comid not in huc
 	elif ('HUC_8' in colNames):
-		coms = [None] * len(shapeLayer)  # No catchments
 		for feature in shapeLayer:
 			polygons.append(feature)
-			huc8s.append(feature.GetField('HUC_8'))
-			huc12s.append(feature.GetField('HUC_12'))
+			try:
+				coms.append(feature.GetField('OBJECTID'))# Object IDs specify each shape (treat like catchment)
+			except:
+				coms = [None] * len(shapeLayer)
 	else:
 		coms = [None] * len(shapeLayer)
 		if(com):
-			coms[0] = com
-		huc8s = [None] * len(shapeLayer)
-		huc12s = [None] * len(shapeLayer)
+			coms[0] = com  #Lat/long case specifies one COMID
 		for feature in shapeLayer:
 			polygons.append(feature)
 	# Reproject geometries from shapefile
@@ -195,7 +195,7 @@ def readGeometry(sfile, url, com):
 	# Calculate cells that contain polygons ahead of time to make intersections faster
 	for feature in nldasLayer:
 		cell = feature.GetGeometryRef()
-		if (totalPoly.Intersects(cell) and feature not in overlap):
+		if (totalPoly.Intersects(cell)):
 			overlap.append(cell.ExportToJson())
 	table = GeometryTable()
 	i = 0;
@@ -224,8 +224,6 @@ def calculations(arg):
 	num_points = 0
 	poly = ogr.CreateGeometryFromJson(polygon)
 	huc12table = Catchment()
-	# huc12table.points.append({"HUC 12 ID": huc12s[i]})
-	# huc12table.points.append({"Catchment ID": coms[i]})
 	for feature in overlap:
 		cell = ogr.CreateGeometryFromJson(feature)
 		interArea = 0
@@ -238,6 +236,4 @@ def calculations(arg):
 										percentArea)
 			huc12table.points.append(catchtable.__dict__)
 			num_points += 1
-	# table.geometry[coms[i]] = huc12table.__dict__
-	# huc8table.append(huc12table)
 	return huc12table, num_points
